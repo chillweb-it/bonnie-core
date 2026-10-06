@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 
 from anthropic import Anthropic, APIError as AnthropicAPIError
 from openai import (
@@ -11,6 +12,8 @@ from openai import (
 )
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+
+from notion_worker import NotionClient, NotionTaskWorker
 
 
 logging.basicConfig(level=logging.INFO)
@@ -33,11 +36,14 @@ Traditional Chinese, use natural Hong Kong Cantonese. Be concise, practical,
 and clear. Never claim that you completed an action or accessed information
 unless the user supplied it in the conversation."""
 
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
+MINIMAX_MODEL = os.getenv("MINIMAX_MODEL", "MiniMax-M3")
+
 
 def ask_claude(text: str) -> str:
     """Generate a reply with Claude, the primary model."""
     response = claude.messages.create(
-        model="claude-sonnet-5-5",
+        model=ANTHROPIC_MODEL,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": text}],
         max_tokens=1200,
@@ -54,7 +60,7 @@ def ask_claude(text: str) -> str:
 def ask_minimax(text: str) -> str:
     """Generate a reply with MiniMax, the fallback model."""
     response = minimax.chat.completions.create(
-        model="MiniMax-M3",
+        model=MINIMAX_MODEL,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": text},
@@ -77,6 +83,35 @@ def ask_bonnie(text: str) -> str:
     except (AnthropicAPIError, ValueError):
         logger.warning("Claude request failed; falling back to MiniMax", exc_info=True)
         return ask_minimax(text)
+
+
+def start_notion_worker() -> NotionTaskWorker | None:
+    """Start v0.3 only when both Notion settings are present."""
+    token = os.getenv("NOTION_TOKEN")
+    data_source_id = os.getenv("NOTION_TASKS_DATA_SOURCE_ID")
+    if not token or not data_source_id:
+        logger.info(
+            "Notion worker disabled; NOTION_TOKEN and "
+            "NOTION_TASKS_DATA_SOURCE_ID are required"
+        )
+        return None
+
+    worker = NotionTaskWorker(
+        NotionClient(
+            token=token,
+            data_source_id=data_source_id,
+            notion_version=os.getenv("NOTION_VERSION", "2026-03-11"),
+        ),
+        ask_bonnie,
+        poll_seconds=int(os.getenv("NOTION_POLL_SECONDS", "30")),
+    )
+    thread = threading.Thread(
+        target=worker.run_forever,
+        name="notion-task-worker",
+        daemon=True,
+    )
+    thread.start()
+    return worker
 
 
 @app.event("message")
@@ -109,4 +144,5 @@ def handle_message(event, say):
 
 
 if __name__ == "__main__":
+    start_notion_worker()
     SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()
