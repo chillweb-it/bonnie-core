@@ -1,6 +1,7 @@
 import logging
 import os
 
+from anthropic import Anthropic, APIError as AnthropicAPIError
 from openai import (
     APIConnectionError,
     APIError,
@@ -16,6 +17,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
+claude = Anthropic(
+    api_key=os.environ["ANTHROPIC_API_KEY"],
+    timeout=45.0,
+)
 minimax = OpenAI(
     api_key=os.environ["MINIMAX_API_KEY"],
     base_url="https://api.minimax.io/v1",
@@ -29,8 +34,25 @@ and clear. Never claim that you completed an action or accessed information
 unless the user supplied it in the conversation."""
 
 
-def ask_bonnie(text: str) -> str:
-    """Generate a final user-facing reply with MiniMax."""
+def ask_claude(text: str) -> str:
+    """Generate a reply with Claude, the primary model."""
+    response = claude.messages.create(
+        model="claude-sonnet-5-5",
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": text}],
+        max_tokens=1200,
+    )
+
+    reply = "\n".join(
+        block.text for block in response.content if block.type == "text"
+    ).strip()
+    if not reply:
+        raise ValueError("Claude returned an empty response")
+    return reply
+
+
+def ask_minimax(text: str) -> str:
+    """Generate a reply with MiniMax, the fallback model."""
     response = minimax.chat.completions.create(
         model="MiniMax-M3",
         messages=[
@@ -48,9 +70,18 @@ def ask_bonnie(text: str) -> str:
     return reply.strip()
 
 
+def ask_bonnie(text: str) -> str:
+    """Use Claude first and fall back to MiniMax on provider failure."""
+    try:
+        return ask_claude(text)
+    except (AnthropicAPIError, ValueError):
+        logger.warning("Claude request failed; falling back to MiniMax", exc_info=True)
+        return ask_minimax(text)
+
+
 @app.event("message")
 def handle_message(event, say):
-    """Answer human-authored direct messages with MiniMax."""
+    """Answer human-authored direct messages with Claude and MiniMax fallback."""
     if event.get("bot_id") or event.get("subtype"):
         return
 
@@ -64,16 +95,16 @@ def handle_message(event, say):
     try:
         say(ask_bonnie(text))
     except AuthenticationError:
-        logger.exception("MiniMax authentication failed")
-        say("MiniMax API 認證失敗，請檢查 Railway 入面嘅 API key。")
+        logger.exception("MiniMax fallback authentication failed")
+        say("AI 服務暫時未能完成認證，請檢查 Railway 入面嘅 API keys。")
     except RateLimitError:
-        logger.exception("MiniMax rate limit reached")
-        say("MiniMax 暫時太繁忙或已達使用限額，請稍後再試。")
+        logger.exception("MiniMax fallback rate limit reached")
+        say("AI 服務暫時太繁忙或已達使用限額，請稍後再試。")
     except APIConnectionError:
-        logger.exception("Could not connect to MiniMax")
-        say("暫時連接唔到 MiniMax，請稍後再試。")
+        logger.exception("Could not connect to MiniMax fallback")
+        say("暫時連接唔到 AI 服務，請稍後再試。")
     except (APIError, ValueError):
-        logger.exception("MiniMax request failed")
+        logger.exception("Claude and MiniMax requests failed")
         say("Bonnie 暫時未能完成回覆，請稍後再試。")
 
 
