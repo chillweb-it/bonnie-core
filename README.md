@@ -76,10 +76,10 @@ For this workspace, the Tasks data source ID is:
 d8077d5a-5ae0-43e5-bd11-b67fc398a090
 ```
 
-The Notion integration must have read and update access to the `Tasks` database
-and to related `Projects` and `Companies` pages if their names should be included
-in task context. Share those pages with the integration in Notion before enabling
-the worker.
+The Notion integration must have read, insert, and update access to the `Tasks`
+database, and read access to related `Projects` and `Companies` pages if their
+names should be included in task context. Share those pages with the integration
+in Notion before enabling the worker.
 
 ## Local run
 

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 
 TASK_COMMAND = re.compile(
-    r"^(?:task|create\s+task|任務|建立任務|新增任務|幫我(?:建立|新增|開)\s*task)\s*[:：]\s*(.+)$",
+    r"(?:^|[\s>*_~`])"
+    r"(?:task|create\s+task|任務|建立任務|新增任務|幫我(?:建立|新增|開)\s*task)"
+    r"\s*[:：]\s*(.+)$",
     re.IGNORECASE | re.DOTALL,
 )
 PRIORITY_LINE = re.compile(
@@ -15,6 +18,11 @@ PRIORITY_LINE = re.compile(
     re.IGNORECASE,
 )
 PRIORITY_SUFFIX = re.compile(r"\s+\[(P[0-3])\]\s*$", re.IGNORECASE)
+INLINE_PRIORITY_SUFFIX = re.compile(
+    r"\s+(?:priority|優先次序|優先級)\s*[:：]\s*(P[0-3])\s*$",
+    re.IGNORECASE,
+)
+INVISIBLE_CHARACTERS = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
 
 SLACK_TASK_HELP = """要建立 Notion 任務，請用以下格式：
 `Task: 任務標題`
@@ -36,7 +44,7 @@ class SlackTaskCommand:
 
 
 def is_task_help(text: str) -> bool:
-    normalized = re.sub(r"\s+", " ", text.strip().lower())
+    normalized = re.sub(r"\s+", " ", normalize_slack_text(text).lower())
     return normalized in {
         "task help",
         "task: help",
@@ -46,13 +54,20 @@ def is_task_help(text: str) -> bool:
     }
 
 
+def normalize_slack_text(text: str) -> str:
+    """Normalize Unicode and remove invisible characters added by rich-text paste."""
+    normalized = unicodedata.normalize("NFKC", text or "")
+    normalized = INVISIBLE_CHARACTERS.sub("", normalized)
+    return normalized.strip()
+
+
 def parse_slack_task_command(text: str) -> SlackTaskCommand | None:
     """Parse only deliberate task commands; ordinary conversation returns None."""
-    match = TASK_COMMAND.match(text.strip())
+    match = TASK_COMMAND.search(normalize_slack_text(text))
     if not match:
         return None
 
-    body = match.group(1).strip()
+    body = match.group(1).strip().lstrip("*_~`>").strip()
     if not body:
         return None
 
@@ -71,6 +86,13 @@ def parse_slack_task_command(text: str) -> SlackTaskCommand | None:
 
     if not content_lines:
         return None
+
+    inline_priority = INLINE_PRIORITY_SUFFIX.search(content_lines[-1])
+    if inline_priority:
+        priority = inline_priority.group(1).upper()
+        content_lines[-1] = INLINE_PRIORITY_SUFFIX.sub(
+            "", content_lines[-1]
+        ).rstrip()
 
     suffix_match = PRIORITY_SUFFIX.search(content_lines[0])
     if suffix_match:

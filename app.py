@@ -176,6 +176,11 @@ def handle_message(event, say):
         return
 
     task_command = parse_slack_task_command(text)
+    logger.info(
+        "Slack DM classified kind=%s length=%s",
+        "task" if task_command else "chat",
+        len(text),
+    )
     if task_command:
         if notion_client is None:
             logger.error("Slack task command received but Notion is not configured")
