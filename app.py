@@ -15,6 +15,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from anthropic_executor import AnthropicAgentExecutor
 from notion_worker import NotionAPIError, NotionClient, NotionTaskWorker
+from run_queue_worker import AgentRunQueueWorker
 from slack_notion import SLACK_TASK_HELP, is_task_help, parse_slack_task_command
 
 
@@ -27,19 +28,25 @@ claude = Anthropic(
     timeout=45.0,
 )
 
-SYSTEM_PROMPT = """You are Bonnie, Evan's capable executive assistant.
+SYSTEM_PROMPT = """You are Bonnie HQ, the staff-facing assistant for Evan's operating system.
 Reply in the same language as the user. When the user writes in Cantonese or
 Traditional Chinese, use natural Hong Kong Cantonese. Be concise, practical,
-and clear. Never claim that you completed an action or accessed information
-unless the user supplied it in the conversation. In Slack DMs, users can create
-a Notion queue item with an explicit `Task: ...` or `任務：...` command. If a user
-asks you to access or change Notion without using that command, explain the
-command briefly instead of saying that no Notion integration exists."""
-
+and clear. Slack is primarily the communication channel for colleagues such as
+Hayley. Never claim that you completed an action or accessed information unless
+the supplied context proves it. Explicit `Task: ...` / `任務：...` commands
+may still create a Notion human-work item for compatibility."""
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
+
 _task_event_lock = threading.Lock()
 _task_event_times: dict[str, float] = {}
 _TASK_EVENT_TTL_SECONDS = 24 * 60 * 60
+
+
+def env_enabled(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def build_notion_client() -> NotionClient | None:
@@ -47,9 +54,7 @@ def build_notion_client() -> NotionClient | None:
     tasks_data_source_id = os.getenv("NOTION_TASKS_DATA_SOURCE_ID")
     agents_data_source_id = os.getenv("NOTION_AGENTS_DATA_SOURCE_ID")
     runs_data_source_id = os.getenv("NOTION_AGENT_RUNS_DATA_SOURCE_ID")
-    if not all(
-        (token, tasks_data_source_id, agents_data_source_id, runs_data_source_id)
-    ):
+    if not all((token, tasks_data_source_id, agents_data_source_id, runs_data_source_id)):
         return None
     return NotionClient(
         token=token,
@@ -92,7 +97,7 @@ def forget_task_event(event_id: str) -> None:
 
 
 def ask_claude(text: str) -> str:
-    """Generate a reply with Claude, the primary model."""
+    """Generate a staff-facing Slack reply with Claude."""
     response = claude.messages.create(
         model=ANTHROPIC_MODEL,
         system=SYSTEM_PROMPT,
@@ -109,29 +114,64 @@ def ask_claude(text: str) -> str:
 
 
 def ask_bonnie(text: str) -> str:
-    """Route every Bonnie Slack message to Claude."""
     return ask_claude(text)
 
 
-def start_notion_worker() -> NotionTaskWorker | None:
-    """Start v0.4 only when its Notion and Anthropic settings are present."""
-    if notion_client is None:
-        logger.info(
-            "Notion worker disabled; token plus Tasks, Agents, and Agent Runs "
-            "data source IDs are required"
-        )
-        return None
+def build_agent_executor() -> AnthropicAgentExecutor | None:
     anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
     if not anthropic_api_key:
-        logger.info("Notion worker disabled; ANTHROPIC_API_KEY is required for v0.4")
         return None
-
-    executor = AnthropicAgentExecutor(
+    return AnthropicAgentExecutor(
         anthropic_api_key,
         timeout_seconds=float(os.getenv("AGENT_TIMEOUT_SECONDS", "90")),
         default_model=os.getenv("ANTHROPIC_AGENT_MODEL", ANTHROPIC_MODEL),
         max_tokens=int(os.getenv("AGENT_MAX_TOKENS", "2000")),
     )
+
+
+def start_agent_run_queue() -> AgentRunQueueWorker | None:
+    """Start v0.5 conversation-first CLAUDE queue consumer."""
+    if not env_enabled("ENABLE_AGENT_RUN_QUEUE", True):
+        logger.info("Agent Run queue disabled by ENABLE_AGENT_RUN_QUEUE")
+        return None
+    if notion_client is None:
+        logger.info("Agent Run queue disabled; Notion registry/run settings are incomplete")
+        return None
+
+    executor = build_agent_executor()
+    if executor is None:
+        logger.info("Agent Run queue disabled; ANTHROPIC_API_KEY is required")
+        return None
+
+    worker = AgentRunQueueWorker(
+        notion_client,
+        executor,
+        poll_seconds=int(os.getenv("AGENT_RUN_POLL_SECONDS", "10")),
+        max_attempts=int(os.getenv("AGENT_MAX_ATTEMPTS", "3")),
+        retry_delay_seconds=float(os.getenv("AGENT_RETRY_DELAY_SECONDS", "2")),
+    )
+    thread = threading.Thread(
+        target=worker.run_forever,
+        name="agent-run-queue-worker",
+        daemon=True,
+    )
+    thread.start()
+    return worker
+
+
+def start_legacy_notion_task_worker() -> NotionTaskWorker | None:
+    """Optional v0.4 compatibility worker. Disabled by default in v0.5."""
+    if not env_enabled("ENABLE_NOTION_TASK_WORKER", False):
+        logger.info("Legacy Notion Task worker disabled")
+        return None
+    if notion_client is None:
+        logger.info("Legacy Notion Task worker disabled; Notion settings are incomplete")
+        return None
+
+    executor = build_agent_executor()
+    if executor is None:
+        logger.info("Legacy Notion Task worker disabled; ANTHROPIC_API_KEY is required")
+        return None
 
     worker = NotionTaskWorker(
         notion_client,
@@ -142,7 +182,7 @@ def start_notion_worker() -> NotionTaskWorker | None:
     )
     thread = threading.Thread(
         target=worker.run_forever,
-        name="notion-task-worker",
+        name="legacy-notion-task-worker",
         daemon=True,
     )
     thread.start()
@@ -151,7 +191,7 @@ def start_notion_worker() -> NotionTaskWorker | None:
 
 @app.event("message")
 def handle_message(event, say):
-    """Answer human-authored direct messages with Claude only."""
+    """Answer human-authored Slack direct messages with Claude."""
     if event.get("bot_id") or event.get("subtype"):
         return
 
@@ -199,7 +239,7 @@ def handle_message(event, say):
             link = f"\n<{page_url}|喺 Notion 開啟>" if page_url else ""
             say(
                 f"已建立 Notion 任務：*{task_command.title}* "
-                f"（{task_command.priority}）。Bonnie 會自動處理。{link}"
+                f"（{task_command.priority}）。{link}"
             )
         except (NotionAPIError, ValueError):
             forget_task_event(event_id)
@@ -224,5 +264,6 @@ def handle_message(event, say):
 
 
 if __name__ == "__main__":
-    start_notion_worker()
+    start_agent_run_queue()
+    start_legacy_notion_task_worker()
     SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()
