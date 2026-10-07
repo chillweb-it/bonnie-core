@@ -22,6 +22,7 @@ DEFAULT_TIMEOUT_SECONDS = 30
 MAX_RELATIONS_PER_PROPERTY = 5
 MAX_RESULT_CHARS = 1800
 MAX_NOTES_CHARS = 12000
+MAX_TITLE_CHARS = 200
 
 
 class NotionAPIError(RuntimeError):
@@ -68,6 +69,17 @@ def _rich_text_value(text: str) -> dict[str, list[dict[str, Any]]]:
     }
 
 
+def _title_value(text: str) -> dict[str, list[dict[str, Any]]]:
+    return {
+        "title": [
+            {
+                "type": "text",
+                "text": {"content": text.strip()[:MAX_TITLE_CHARS]},
+            }
+        ]
+    }
+
+
 def _append_note(existing: str, note: str) -> str:
     combined = f"{existing.rstrip()}\n\n{note}" if existing.strip() else note
     return combined[-MAX_NOTES_CHARS:]
@@ -102,7 +114,7 @@ class NotionClient:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Notion-Version": notion_version,
-            "User-Agent": "bonnie-core/0.3",
+            "User-Agent": "bonnie-core/0.3.1",
         }
 
     def _request(
@@ -166,6 +178,40 @@ class NotionClient:
     def update_page(self, page_id: str, properties: dict[str, Any]) -> dict[str, Any]:
         return self._request(
             "PATCH", f"/pages/{page_id}", json_body={"properties": properties}
+        )
+
+    def create_task(
+        self,
+        title: str,
+        notes: str,
+        *,
+        priority: str = "P2",
+    ) -> dict[str, Any]:
+        """Create one safe, immediately eligible task from an explicit Slack command."""
+        clean_title = title.strip()
+        if not clean_title:
+            raise ValueError("Task title is required")
+        if priority not in {"P0", "P1", "P2", "P3"}:
+            raise ValueError("Priority must be P0, P1, P2, or P3")
+
+        return self._request(
+            "POST",
+            "/pages",
+            json_body={
+                "parent": {
+                    "type": "data_source_id",
+                    "data_source_id": self.data_source_id,
+                },
+                "properties": {
+                    "Title": _title_value(clean_title),
+                    "Notes": _rich_text_value(notes.strip() or clean_title),
+                    "Status": {"select": {"name": "Open"}},
+                    "Priority": {"select": {"name": priority}},
+                    "CEO Required": {"checkbox": False},
+                    "Need clarification": {"checkbox": False},
+                    "Assignee": _rich_text_value("Bonnie / bonnie-core"),
+                },
+            },
         )
 
     def _relation_titles(

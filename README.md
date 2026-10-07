@@ -1,10 +1,33 @@
 # bonnie-core
 
-Railway worker for Bonnie. Slack Socket Mode remains available, while Agent
-Project v0.3 adds a minimal single-agent Notion Tasks workflow using Claude as
-the primary executor.
+Railway worker for Bonnie. Slack Socket Mode remains available, Agent Project
+v0.3 adds a minimal single-agent Notion Tasks workflow, and v0.3.1 adds an
+explicit Slack-to-Notion task bridge. Claude is the primary executor.
 
-## v0.3 workflow
+## v0.3.1 Slack task commands
+
+Direct-message Bonnie with an explicit task command:
+
+```text
+Task: Prepare next week's board agenda
+Summarize open decisions, risks, and items that need CEO approval.
+Priority: P1
+```
+
+Bonnie creates one Notion task with safe queue defaults (`Open`, CEO Required
+off, Need clarification off, and Assignee `Bonnie / bonnie-core`), replies with
+the Notion link, and leaves the existing worker to claim and execute it.
+
+Supported prefixes include `Task:`, `Create task:`, `任務：`, `建立任務：`, and
+`幫我建立 Task：`. Priority defaults to `P2`; set `Priority: P0` through `P3`
+on its own line or add `[P0]` through `[P3]` after the title. Send `Task help`
+for an example inside Slack.
+
+Only direct messages are accepted. Ordinary messages remain normal Bonnie chat
+and cannot accidentally create a Notion task. Slack retry IDs are remembered in
+memory for 24 hours to prevent normal duplicate creation.
+
+## v0.3 Notion worker
 
 Every polling cycle selects at most one Tasks row matching all three rules:
 
@@ -86,4 +109,4 @@ python -m unittest -v
 5. Confirm the same task becomes `Done` and has a concise Bonnie note.
 
 The future multi-agent registry, routing, retry database, and Agent Runs model
-are intentionally outside v0.3.
+are intentionally outside v0.3.1.

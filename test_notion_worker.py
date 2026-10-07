@@ -105,6 +105,39 @@ class NotionWorkerTests(unittest.TestCase):
         self.assertNotIn("Project", captured)
         self.assertEqual(captured["Status"]["select"]["name"], "Done")
 
+    def test_create_task_uses_safe_queue_defaults(self):
+        client = NotionClient("not-a-real-token", "data-source-id")
+        captured = {}
+
+        def capture(method, path, *, json_body=None):
+            captured.update({"method": method, "path": path, "body": json_body})
+            return {"id": "new-page", "url": "https://notion.so/new-page"}
+
+        client._request = capture
+        page = client.create_task(
+            "Prepare board agenda",
+            "Summarize decisions and risks.",
+            priority="P1",
+        )
+
+        self.assertEqual(page["id"], "new-page")
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["path"], "/pages")
+        body = captured["body"]
+        self.assertEqual(body["parent"]["data_source_id"], "data-source-id")
+        properties = body["properties"]
+        self.assertEqual(properties["Status"]["select"]["name"], "Open")
+        self.assertEqual(properties["Priority"]["select"]["name"], "P1")
+        self.assertFalse(properties["CEO Required"]["checkbox"])
+        self.assertFalse(properties["Need clarification"]["checkbox"])
+        self.assertNotIn("Company", properties)
+        self.assertNotIn("Project", properties)
+
+    def test_create_task_rejects_invalid_priority(self):
+        client = NotionClient("not-a-real-token", "data-source-id")
+        with self.assertRaises(ValueError):
+            client.create_task("Prepare update", "Notes", priority="urgent")
+
 
 if __name__ == "__main__":
     unittest.main()
