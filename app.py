@@ -3,17 +3,17 @@ import os
 import threading
 import time
 
-from anthropic import Anthropic, APIError as AnthropicAPIError
-from openai import (
+from anthropic import (
     APIConnectionError,
     APIError,
     AuthenticationError,
-    OpenAI,
+    Anthropic,
     RateLimitError,
 )
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+from anthropic_executor import AnthropicAgentExecutor
 from notion_worker import NotionAPIError, NotionClient, NotionTaskWorker
 from slack_notion import SLACK_TASK_HELP, is_task_help, parse_slack_task_command
 
@@ -24,11 +24,6 @@ logger = logging.getLogger(__name__)
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
 claude = Anthropic(
     api_key=os.environ["ANTHROPIC_API_KEY"],
-    timeout=45.0,
-)
-minimax = OpenAI(
-    api_key=os.environ["MINIMAX_API_KEY"],
-    base_url="https://api.minimax.io/v1",
     timeout=45.0,
 )
 
@@ -42,7 +37,6 @@ asks you to access or change Notion without using that command, explain the
 command briefly instead of saying that no Notion integration exists."""
 
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
-MINIMAX_MODEL = os.getenv("MINIMAX_MODEL", "MiniMax-M3")
 _task_event_lock = threading.Lock()
 _task_event_times: dict[str, float] = {}
 _TASK_EVENT_TTL_SECONDS = 24 * 60 * 60
@@ -50,13 +44,20 @@ _TASK_EVENT_TTL_SECONDS = 24 * 60 * 60
 
 def build_notion_client() -> NotionClient | None:
     token = os.getenv("NOTION_TOKEN")
-    data_source_id = os.getenv("NOTION_TASKS_DATA_SOURCE_ID")
-    if not token or not data_source_id:
+    tasks_data_source_id = os.getenv("NOTION_TASKS_DATA_SOURCE_ID")
+    agents_data_source_id = os.getenv("NOTION_AGENTS_DATA_SOURCE_ID")
+    runs_data_source_id = os.getenv("NOTION_AGENT_RUNS_DATA_SOURCE_ID")
+    if not all(
+        (token, tasks_data_source_id, agents_data_source_id, runs_data_source_id)
+    ):
         return None
     return NotionClient(
         token=token,
-        data_source_id=data_source_id,
+        data_source_id=tasks_data_source_id,
+        agents_data_source_id=agents_data_source_id,
+        agent_runs_data_source_id=runs_data_source_id,
         notion_version=os.getenv("NOTION_VERSION", "2026-03-11"),
+        timeout_seconds=int(os.getenv("NOTION_TIMEOUT_SECONDS", "30")),
     )
 
 
@@ -107,47 +108,37 @@ def ask_claude(text: str) -> str:
     return reply
 
 
-def ask_minimax(text: str) -> str:
-    """Generate a reply with MiniMax, the fallback model."""
-    response = minimax.chat.completions.create(
-        model=MINIMAX_MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text},
-        ],
-        max_completion_tokens=1200,
-        temperature=0.7,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
-
-    reply = response.choices[0].message.content
-    if not reply or not reply.strip():
-        raise ValueError("MiniMax returned an empty response")
-    return reply.strip()
-
-
 def ask_bonnie(text: str) -> str:
-    """Use Claude first and fall back to MiniMax on provider failure."""
-    try:
-        return ask_claude(text)
-    except (AnthropicAPIError, ValueError):
-        logger.warning("Claude request failed; falling back to MiniMax", exc_info=True)
-        return ask_minimax(text)
+    """Route every Bonnie Slack message to Claude."""
+    return ask_claude(text)
 
 
 def start_notion_worker() -> NotionTaskWorker | None:
-    """Start v0.3 only when both Notion settings are present."""
+    """Start v0.4 only when its Notion and Anthropic settings are present."""
     if notion_client is None:
         logger.info(
-            "Notion worker disabled; NOTION_TOKEN and "
-            "NOTION_TASKS_DATA_SOURCE_ID are required"
+            "Notion worker disabled; token plus Tasks, Agents, and Agent Runs "
+            "data source IDs are required"
         )
         return None
+    anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not anthropic_api_key:
+        logger.info("Notion worker disabled; ANTHROPIC_API_KEY is required for v0.4")
+        return None
+
+    executor = AnthropicAgentExecutor(
+        anthropic_api_key,
+        timeout_seconds=float(os.getenv("AGENT_TIMEOUT_SECONDS", "90")),
+        default_model=os.getenv("ANTHROPIC_AGENT_MODEL", ANTHROPIC_MODEL),
+        max_tokens=int(os.getenv("AGENT_MAX_TOKENS", "2000")),
+    )
 
     worker = NotionTaskWorker(
         notion_client,
-        ask_bonnie,
+        executor,
         poll_seconds=int(os.getenv("NOTION_POLL_SECONDS", "30")),
+        max_attempts=int(os.getenv("AGENT_MAX_ATTEMPTS", "3")),
+        retry_delay_seconds=float(os.getenv("AGENT_RETRY_DELAY_SECONDS", "2")),
     )
     thread = threading.Thread(
         target=worker.run_forever,
@@ -160,7 +151,7 @@ def start_notion_worker() -> NotionTaskWorker | None:
 
 @app.event("message")
 def handle_message(event, say):
-    """Answer human-authored direct messages with Claude and MiniMax fallback."""
+    """Answer human-authored direct messages with Claude only."""
     if event.get("bot_id") or event.get("subtype"):
         return
 
@@ -219,16 +210,16 @@ def handle_message(event, say):
     try:
         say(ask_bonnie(text))
     except AuthenticationError:
-        logger.exception("MiniMax fallback authentication failed")
-        say("AI 服務暫時未能完成認證，請檢查 Railway 入面嘅 API keys。")
+        logger.exception("Claude authentication failed")
+        say("Claude 暫時未能完成認證，請檢查 Railway 入面嘅 Anthropic API key。")
     except RateLimitError:
-        logger.exception("MiniMax fallback rate limit reached")
-        say("AI 服務暫時太繁忙或已達使用限額，請稍後再試。")
+        logger.exception("Claude rate limit reached")
+        say("Claude 暫時太繁忙或已達使用限額，請稍後再試。")
     except APIConnectionError:
-        logger.exception("Could not connect to MiniMax fallback")
-        say("暫時連接唔到 AI 服務，請稍後再試。")
+        logger.exception("Could not connect to Claude")
+        say("暫時連接唔到 Claude，請稍後再試。")
     except (APIError, ValueError):
-        logger.exception("Claude and MiniMax requests failed")
+        logger.exception("Claude request failed")
         say("Bonnie 暫時未能完成回覆，請稍後再試。")
 
 
