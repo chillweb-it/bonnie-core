@@ -41,6 +41,19 @@ class SourceFieldTests(unittest.TestCase):
 
 
 class KnowledgeTests(unittest.TestCase):
+    def test_ceo_requires_server_grant_and_cannot_grant_other_callers(self):
+        from knowledge_service import slack_scope
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(slack_scope('U07AGT63JGY').companies, ())
+            self.assertEqual(slack_scope('U07AGT63JGY').audience, ('staff',))
+        with patch.dict(os.environ, {'KNOWLEDGE_SLACK_SCOPE_U07AGT63JGY': '{"all_companies":true,"audience":["staff","ceo"]}'}, clear=True):
+            scope = slack_scope('U07AGT63JGY')
+            self.assertEqual(scope.principal, 'slack:U07AGT63JGY')
+            self.assertEqual(scope.companies, ('*',))
+            self.assertEqual(scope.audience, ('staff','ceo'))
+            self.assertEqual(slack_scope('other').companies, ())
+            self.assertEqual(slack_scope('other').audience, ('staff',))
+
     def test_chunk_preserves_heading_and_tail(self):
         text = '# Rules\n' + '欖球剪片' * 500 + '\n最後一句'
         parts = chunks(text)
