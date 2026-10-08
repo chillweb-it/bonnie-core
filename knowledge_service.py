@@ -87,13 +87,41 @@ def prop(props, name):
     typ = item.get("type")
     if typ in {"title", "rich_text"}:
         return "".join(x.get("plain_text", x.get("text", {}).get("content", "")) for x in item.get(typ, []))
-    if typ == "select":
-        return (item.get("select") or {}).get("name", "")
+    if typ in {"select", "status"}:
+        return (item.get(typ) or {}).get("name", "")
     if typ == "multi_select":
         return tuple(x["name"] for x in item.get(typ, []))
     if typ == "date":
         return (item.get("date") or {}).get("start", "")
     return item.get(typ, "") if typ else ""
+
+
+def source_properties(page):
+    """Include operational fields, never arbitrary properties or credentials."""
+    lines = []
+    props = page.get("properties", {})
+    allowed = ("Name", "Title", "Status", "Owner", "Assignee", "Next step",
+               "Blocker", "Waiting on", "Priority", "Objective", "Notes",
+               "Due date", "Review date")
+    for name in allowed:
+        item = props.get(name, {})
+        if item.get("type") not in {"title", "rich_text", "select", "status", "date", "multi_select", "people"}:
+            continue
+        if item.get("type") == "people":
+            value = ", ".join(person.get("name") or person.get("id", "") for person in item.get("people", []))
+        elif item.get("type") == "date":
+            dates = item.get("date") or {}
+            value = dates.get("start", "") + (" → " + dates["end"] if dates.get("end") else "")
+        else:
+            value = prop(props, name)
+            if isinstance(value, tuple):
+                value = ", ".join(value)
+        if value:
+            lines.append(f"{name}: {value}")
+    # A timestamp alone must not make an otherwise empty source valid.
+    if lines and page.get("last_edited_time"):
+        lines.append("Source last edited: " + page["last_edited_time"])
+    return "# Notion source fields\n" + "\n".join(lines) if lines else ""
 
 
 class NotionKnowledgeSource:
@@ -158,7 +186,7 @@ class NotionKnowledgeSource:
             page = self.client.get_page(source_id)
             if page.get("archived") or page.get("in_trash"):
                 continue
-            content = self.content(source_id)
+            content = "\n\n".join(part for part in (source_properties(page), self.content(source_id)) if part)
             if not content.strip():
                 raise KnowledgeUnavailable("Approved source is empty")
             audience = prop(p, "Audience")
