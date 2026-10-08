@@ -270,13 +270,13 @@ class KnowledgeService:
             probe = self.search("Bonnie system channel rules", Scope("startup-check", (), ("staff",)), domain="SYSTEM", limit=1)
             logger.info("knowledge_retrieval_verified required=%s matches=%s", len(probe["required"]), len(probe["matches"]))
             logger.info("knowledge_sync_completed documents=%s", len(documents))
-            if os.getenv("KNOWLEDGE_SLACK_SCOPE_U07GH6ZN8RW"):
-                eva_scope = slack_scope("U07GH6ZN8RW")
-                eva_probe = self.search("祥雲 Website Rebuild Work E Status Next step", eva_scope,
-                                        company="Cloud Decoct", domain="MARKETING", limit=20)
-                rows = eva_probe["required"] + eva_probe["matches"]
+            for verified_user in ("U07AGT63JGY", "U07GH6ZN8RW"):
+                scope = slack_scope(verified_user)
+                probe = self.search("祥雲 Website Rebuild Work E Status Next step", scope,
+                                    domain="MARKETING", limit=20)
+                rows = probe["required"] + probe["matches"]
                 logger.info("staff_retrieval_verified principal=%s all_companies=%s audience=%s source_ids=%s task_status_present=%s source_date_present=%s",
-                    eva_scope.principal, "*" in eva_scope.companies, ",".join(eva_scope.audience),
+                    scope.principal, "*" in scope.companies, ",".join(scope.audience),
                     ",".join(sorted({row["knowledge_id"] for row in rows})),
                     any("Status: Doing" in row["content"] for row in rows),
                     any("Source last edited:" in row["content"] for row in rows))
