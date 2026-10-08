@@ -103,6 +103,12 @@ def forget_task_event(event_id: str) -> None:
 def ask_claude(text: str, user_id: str = "", channel: str = "", event_ts: str = "") -> str:
     """Generate a staff-facing Slack reply with Claude."""
     context = knowledge_service.context(text, slack_scope(user_id)) if knowledge_service else ""
+    runtime = ("\nRuntime verified: Notion-backed shared Knowledge retrieval succeeded for this request. "
+               "You have access to the supplied approved, scoped index, not unrestricted live Notion search. "
+               "Missing project results mean not indexed/not in caller scope, never proof of no Notion connection. "
+               "Cite the supplied source and its last-edited date; old task status does not prove current completion. "
+               "Do not ask a caller to reconnect Notion when this retrieval succeeded.\n") if knowledge_service else ""
+    context = runtime + context
     if channel and event_ts and os.getenv("KNOWLEDGE_DATABASE_URL"):
         history = own_dm_history(app.client, channel, event_ts, user_id)
         if history and history[-1]["role"] == "user":
