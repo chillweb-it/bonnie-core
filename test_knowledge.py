@@ -41,6 +41,17 @@ class SourceFieldTests(unittest.TestCase):
 
 
 class KnowledgeTests(unittest.TestCase):
+    def test_hayley_work_grant_does_not_include_ceo_or_other_companies(self):
+        from knowledge_service import slack_scope
+        with patch.dict(os.environ, {'KNOWLEDGE_SLACK_SCOPE_U0A38SB122V': '{"companies":["Cloud Decoct"],"audience":["staff"]}'}, clear=True):
+            scope = slack_scope('U0A38SB122V')
+            self.assertEqual(scope.companies, ('Cloud Decoct',))
+            self.assertEqual(scope.audience, ('staff',))
+            service = KnowledgeService('', None)
+            service.ready.set()
+            with self.assertRaises(PermissionError):
+                service.search('Other company work', scope, company='ChillWeb')
+
     def test_ceo_requires_server_grant_and_cannot_grant_other_callers(self):
         from knowledge_service import slack_scope
         with patch.dict(os.environ, {}, clear=True):
