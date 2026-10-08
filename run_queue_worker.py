@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from anthropic_executor import ExecutionResult
+from knowledge_service import KnowledgeUnavailable, Scope
 from notion_worker import (
     AgentRecord,
     FALLBACK_AGENT_ID,
@@ -52,12 +53,14 @@ class AgentRunQueueWorker:
         client: NotionClient,
         executor: Any,
         *,
+        knowledge=None,
         poll_seconds: int = 10,
         max_attempts: int = 3,
         retry_delay_seconds: float = 2.0,
     ) -> None:
         self.client = client
         self.executor = executor
+        self.knowledge = knowledge
         self.poll_seconds = max(5, poll_seconds)
         self.max_attempts = max(1, max_attempts)
         self.retry_delay_seconds = max(0.0, retry_delay_seconds)
@@ -226,6 +229,8 @@ class AgentRunQueueWorker:
         )
 
     def process_one(self) -> bool:
+        if self.knowledge is not None and not self.knowledge.ready.is_set():
+            return False
         if not self._processing_lock.acquire(blocking=False):
             return False
         try:
@@ -271,6 +276,14 @@ class AgentRunQueueWorker:
             )
 
             prompt = self._build_prompt(run, agent)
+            if self.knowledge is not None:
+                aliases = {"CD": "Cloud Decoct", "CW": "ChillWeb", "THT": "THT Lions"}
+                company = aliases.get(run.company, run.company)
+                try:
+                    prompt += self.knowledge.context(run.work_brief, Scope("run:" + run.run_id, (company,), ("staff", "ceo")), company=company, domain=run.domain)
+                except Exception:
+                    self._wait_run(run, "Shared Knowledge unavailable; no Claude call made. Verify sync, then requeue.")
+                    return True
             last_error: Exception | None = None
             result: ExecutionResult | None = None
             completed_attempt = 0
@@ -347,3 +360,4 @@ class AgentRunQueueWorker:
 
     def stop(self) -> None:
         self._stop_event.set()
+

@@ -16,6 +16,8 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from anthropic_executor import AnthropicAgentExecutor
 from notion_worker import NotionAPIError, NotionClient, NotionTaskWorker
 from run_queue_worker import AgentRunQueueWorker
+from knowledge_service import build_knowledge_service, KnowledgeUnavailable, slack_scope
+from knowledge_api import start_api
 from slack_notion import SLACK_TASK_HELP, is_task_help, parse_slack_task_command
 
 
@@ -67,6 +69,7 @@ def build_notion_client() -> NotionClient | None:
 
 
 notion_client = build_notion_client()
+knowledge_service = build_knowledge_service()
 
 
 def remember_task_event(event_id: str) -> bool:
@@ -96,11 +99,12 @@ def forget_task_event(event_id: str) -> None:
         _task_event_times.pop(event_id, None)
 
 
-def ask_claude(text: str) -> str:
+def ask_claude(text: str, user_id: str = "") -> str:
     """Generate a staff-facing Slack reply with Claude."""
+    context = knowledge_service.context(text, slack_scope(user_id)) if knowledge_service else ""
     response = claude.messages.create(
         model=ANTHROPIC_MODEL,
-        system=SYSTEM_PROMPT,
+        system=SYSTEM_PROMPT + context,
         messages=[{"role": "user", "content": text}],
         max_tokens=1200,
     )
@@ -113,8 +117,8 @@ def ask_claude(text: str) -> str:
     return reply
 
 
-def ask_bonnie(text: str) -> str:
-    return ask_claude(text)
+def ask_bonnie(text: str, user_id: str = "") -> str:
+    return ask_claude(text, user_id)
 
 
 def build_agent_executor() -> AnthropicAgentExecutor | None:
@@ -146,6 +150,7 @@ def start_agent_run_queue() -> AgentRunQueueWorker | None:
     worker = AgentRunQueueWorker(
         notion_client,
         executor,
+        knowledge=knowledge_service,
         poll_seconds=int(os.getenv("AGENT_RUN_POLL_SECONDS", "10")),
         max_attempts=int(os.getenv("AGENT_MAX_ATTEMPTS", "3")),
         retry_delay_seconds=float(os.getenv("AGENT_RETRY_DELAY_SECONDS", "2")),
@@ -248,7 +253,9 @@ def handle_message(event, say):
         return
 
     try:
-        say(ask_bonnie(text))
+        say(ask_bonnie(text, event.get("user", "")))
+    except KnowledgeUnavailable:
+        say("共享 Knowledge 暫時未能核實，我未能按現行守則完成呢個回覆，請稍後再試。")
     except AuthenticationError:
         logger.exception("Claude authentication failed")
         say("Claude 暫時未能完成認證，請檢查 Railway 入面嘅 Anthropic API key。")
@@ -264,6 +271,11 @@ def handle_message(event, say):
 
 
 if __name__ == "__main__":
+    logger.info("runtime_verified slack_provider=anthropic slack_model=%s agent_default_model=%s commit=%s", ANTHROPIC_MODEL, os.getenv("ANTHROPIC_AGENT_MODEL", ANTHROPIC_MODEL), os.getenv("RAILWAY_GIT_COMMIT_SHA", "unknown"))
+    if knowledge_service:
+        threading.Thread(target=knowledge_service.run_forever, name="knowledge-sync", daemon=True).start()
+        start_api(knowledge_service)
     start_agent_run_queue()
     start_legacy_notion_task_worker()
     SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()
+
