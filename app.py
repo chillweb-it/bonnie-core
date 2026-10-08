@@ -19,6 +19,7 @@ from run_queue_worker import AgentRunQueueWorker
 from knowledge_service import build_knowledge_service, KnowledgeUnavailable, slack_scope
 from knowledge_api import start_api
 from slack_notion import SLACK_TASK_HELP, is_task_help, parse_slack_task_command
+from slack_bridge import PostgresReceipts, own_dm_history, bridge_reply
 
 
 logging.basicConfig(level=logging.INFO)
@@ -99,9 +100,25 @@ def forget_task_event(event_id: str) -> None:
         _task_event_times.pop(event_id, None)
 
 
-def ask_claude(text: str, user_id: str = "") -> str:
+def ask_claude(text: str, user_id: str = "", channel: str = "", event_ts: str = "") -> str:
     """Generate a staff-facing Slack reply with Claude."""
     context = knowledge_service.context(text, slack_scope(user_id)) if knowledge_service else ""
+    runtime = ("\nRuntime verified: Notion-backed shared Knowledge retrieval succeeded for this request. "
+               "You have access to the supplied approved, scoped index, not unrestricted live Notion search. "
+               "Missing project results mean not indexed/not in caller scope, never proof of no Notion connection. "
+               "Cite the supplied source and its last-edited date; old task status does not prove current completion. "
+               "Do not ask a caller to reconnect Notion when this retrieval succeeded.\n") if knowledge_service else ""
+    context = runtime + context
+    if channel and event_ts and os.getenv("KNOWLEDGE_DATABASE_URL"):
+        history = own_dm_history(app.client, channel, event_ts, user_id)
+        if history and history[-1]["role"] == "user":
+            history[-1]["content"] += "\n" + text
+        else:
+            history.append({"role": "user", "content": text})
+        return bridge_reply(claude, ANTHROPIC_MODEL, SYSTEM_PROMPT + context,
+                            history, app.client,
+                            PostgresReceipts(os.environ["KNOWLEDGE_DATABASE_URL"]),
+                            user_id, channel, event_ts)
     response = claude.messages.create(
         model=ANTHROPIC_MODEL,
         system=SYSTEM_PROMPT + context,
@@ -117,8 +134,8 @@ def ask_claude(text: str, user_id: str = "") -> str:
     return reply
 
 
-def ask_bonnie(text: str, user_id: str = "") -> str:
-    return ask_claude(text, user_id)
+def ask_bonnie(text: str, user_id: str = "", channel: str = "", event_ts: str = "") -> str:
+    return ask_claude(text, user_id, channel, event_ts)
 
 
 def build_agent_executor() -> AnthropicAgentExecutor | None:
@@ -253,7 +270,7 @@ def handle_message(event, say):
         return
 
     try:
-        say(ask_bonnie(text, event.get("user", "")))
+        say(ask_bonnie(text, event.get("user", ""), event.get("channel", ""), event.get("ts", "")))
     except KnowledgeUnavailable:
         say("共享 Knowledge 暫時未能核實，我未能按現行守則完成呢個回覆，請稍後再試。")
     except AuthenticationError:
