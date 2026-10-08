@@ -193,7 +193,9 @@ failure and must be requeued after fixing sync; unready startup pauses polling.
 Unlisted Slack users can only retrieve staff-readable Shared knowledge. Add
 verified Slack user IDs to KNOWLEDGE_SLACK_SCOPES with company/audience grants.
 Company aliases CD/CW/THT in runs resolve to Cloud Decoct/ChillWeb/THT Lions.
-A run's company constrains retrieval; its knowledge grants do not grant external
+Agents default to staff-readable knowledge; verified agent IDs may be granted
+ceo audience with KNOWLEDGE_AGENT_SCOPES. A run's company constrains retrieval;
+its knowledge grants do not grant external
 tools. No automatic CEO privileges are inferred from a message's text.
 
 Authenticated external adapters:

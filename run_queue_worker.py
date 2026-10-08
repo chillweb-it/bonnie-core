@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import json
+import os
 import threading
 import time
 import uuid
@@ -280,7 +282,7 @@ class AgentRunQueueWorker:
                 aliases = {"CD": "Cloud Decoct", "CW": "ChillWeb", "THT": "THT Lions"}
                 company = aliases.get(run.company, run.company)
                 try:
-                    prompt += self.knowledge.context(run.work_brief, Scope("run:" + run.run_id, (company,), ("staff", "ceo")), company=company, domain=run.domain)
+                    prompt += self.knowledge.context(run.work_brief, Scope("run:" + run.run_id, (company,), tuple(json.loads(os.getenv("KNOWLEDGE_AGENT_SCOPES", "{}" )).get(agent.agent_id, {}).get("audience", ["staff"]))), company=company, domain=run.domain)
                 except Exception:
                     self._wait_run(run, "Shared Knowledge unavailable; no Claude call made. Verify sync, then requeue.")
                     return True

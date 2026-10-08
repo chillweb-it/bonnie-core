@@ -68,5 +68,54 @@ class KnowledgeTests(unittest.TestCase):
             svc.search('rules',Scope('staff'))
 
 
+class QueueKnowledgeTests(unittest.TestCase):
+    def worker(self, knowledge):
+        from run_queue_worker import AgentRunQueueWorker, QueuedClaudeRun
+        from notion_worker import AgentRecord
+        from unittest.mock import Mock
+        client, executor = Mock(), Mock()
+        agent = AgentRecord('agent-page','AGT-CD','Research','CD','MARKETING',True,'claude-test','Instructions',False)
+        worker = AgentRunQueueWorker(client, executor, knowledge=knowledge)
+        worker._find_queued_run = Mock(return_value={'id':'run-page'})
+        worker._parse_run = Mock(return_value=QueuedClaudeRun('run-page','RUN-1','CD','MARKETING','YouTube rules','',False,False,1,()))
+        client.load_agents.return_value = {'AGT-CD':agent}
+        worker._choose_agent = Mock(return_value=agent)
+        worker._claim = Mock(return_value='claim')
+        worker._complete = Mock()
+        return worker, executor
+
+    def test_startup_unready_does_not_claim(self):
+        from unittest.mock import Mock
+        knowledge=Mock()
+        knowledge.ready.is_set.return_value=False
+        worker, executor=self.worker(knowledge)
+        self.assertFalse(worker.process_one())
+        worker._find_queued_run.assert_not_called()
+        executor.execute.assert_not_called()
+
+    def test_failed_retrieval_waits_without_model_call(self):
+        from unittest.mock import Mock
+        knowledge=Mock()
+        knowledge.context.side_effect=KnowledgeUnavailable('index stale')
+        worker, executor=self.worker(knowledge)
+        self.assertTrue(worker.process_one())
+        executor.execute.assert_not_called()
+        updates=worker.client.update_page.call_args_list
+        self.assertTrue(any(call.args[1].get('Status',{}).get('select',{}).get('name')=='Waiting' for call in updates))
+
+    def test_successful_retrieval_reaches_model_with_citation(self):
+        from unittest.mock import Mock
+        from anthropic_executor import ExecutionResult
+        knowledge=Mock()
+        knowledge.context.return_value='[KB-YT-001 v1 revision=123] Approved rules'
+        worker, executor=self.worker(knowledge)
+        executor.execute.return_value=ExecutionResult('Complete')
+        self.assertTrue(worker.process_one())
+        self.assertIn('[KB-YT-001 v1',executor.execute.call_args.kwargs['prompt'])
+        self.assertEqual(knowledge.context.call_args.kwargs['company'],'Cloud Decoct')
+        self.assertEqual(knowledge.context.call_args.args[1].audience,('staff',))
+        worker._complete.assert_called_once()
+
+
 if __name__ == '__main__':
     unittest.main()
